@@ -1,14 +1,20 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import Header from "../components/Header";
 import Modal from "../components/Modal";
-import StatusBadge from "../components/StatusBadge";
+import ProductImagesInput from "../components/ProductImagesInput";
+import ProductImageGalleryModal from "../components/ProductImageGalleryModal";
 import {
   getProducts,
   createProduct,
   updateProduct,
   updateProductStock,
   deleteProduct,
+  getProductImagePaths,
+  getProductImageUrls,
+  validateImageFiles,
+  urlToImageFile,
+  formatProductApiError,
 } from "../api/products";
 import { getCategories } from "../api/categories";
 import { getAssetUrl } from "../api/axios";
@@ -31,6 +37,9 @@ export default function Products() {
   const [formSubmitting, setFormSubmitting] = useState(false);
   const [formError, setFormError] = useState("");
 
+  // Gallery / Details Modal State
+  const [galleryProduct, setGalleryProduct] = useState(null);
+
   // Product Form Fields
   const [form, setForm] = useState({
     name: "",
@@ -39,8 +48,24 @@ export default function Products() {
     category_id: "",
     description: "",
   });
-  const [imageFile, setImageFile] = useState(null);
-  const [imagePreview, setImagePreview] = useState(null);
+  const [productImages, setProductImages] = useState([]);
+  const [imageError, setImageError] = useState("");
+  const productImagesRef = useRef([]);
+
+  useEffect(() => {
+    productImagesRef.current = productImages;
+  }, [productImages]);
+
+  // Revoke any remaining blob object URLs on unmount
+  useEffect(() => {
+    return () => {
+      productImagesRef.current.forEach((item) => {
+        if (item.kind === "new") {
+          URL.revokeObjectURL(item.previewUrl);
+        }
+      });
+    };
+  }, []);
 
   async function loadData() {
     setLoading(true);
@@ -96,7 +121,50 @@ export default function Products() {
     }
   }
 
+  function buildExistingImageItems(prod) {
+    return getProductImagePaths(prod).map((rawPath, index) => {
+      const cleanPath = rawPath.split("?")[0].split("#")[0];
+      const name =
+        cleanPath.substring(cleanPath.lastIndexOf("/") + 1) ||
+        `image-${index + 1}.jpg`;
+      return {
+        id: `existing-${index}-${rawPath}`,
+        kind: "existing",
+        rawPath,
+        previewUrl: getAssetUrl(rawPath),
+        name,
+      };
+    });
+  }
+
+  function revokeNewBlobUrls(items) {
+    items.forEach((item) => {
+      if (item.kind === "new") {
+        URL.revokeObjectURL(item.previewUrl);
+      }
+    });
+  }
+
+  function clearAllProductImages() {
+    revokeNewBlobUrls(productImagesRef.current);
+    setProductImages([]);
+    setImageError("");
+  }
+
+  function resetToSavedImages() {
+    if (!editingProduct) return;
+    revokeNewBlobUrls(productImagesRef.current);
+    setProductImages(buildExistingImageItems(editingProduct));
+    setImageError("");
+  }
+
+  function closeProductModal() {
+    clearAllProductImages();
+    setModalOpen(false);
+  }
+
   function openCreateModal() {
+    clearAllProductImages();
     setEditingProduct(null);
     setForm({
       name: "",
@@ -105,13 +173,12 @@ export default function Products() {
       category_id: categories[0]?.id || "",
       description: "",
     });
-    setImageFile(null);
-    setImagePreview(null);
     setFormError("");
     setModalOpen(true);
   }
 
   function openEditModal(prod) {
+    revokeNewBlobUrls(productImagesRef.current);
     setEditingProduct(prod);
     setForm({
       name: prod.name || "",
@@ -120,19 +187,76 @@ export default function Products() {
       category_id: prod.category_id || prod.category?.id || "",
       description: prod.description || "",
     });
-    setImageFile(null);
-    setImagePreview(prod.image_url ? getAssetUrl(prod.image_url) : null);
+    setProductImages(buildExistingImageItems(prod));
+    setImageError("");
     setFormError("");
     setModalOpen(true);
   }
 
-  function handleImageChange(e) {
-    const file = e.target.files[0];
-    if (file) {
-      setImageFile(file);
-      setImagePreview(URL.createObjectURL(file));
+  function handleAddImageFiles(files) {
+    const { validFiles, invalidNames } = validateImageFiles(files);
+
+    if (invalidNames.length > 0) {
+      setImageError(
+        `Unsupported file(s): ${invalidNames.join(", ")}. Allowed extensions: .jpg, .jpeg, .png, .webp.`
+      );
+    } else {
+      setImageError("");
     }
+
+    if (validFiles.length === 0) return;
+
+    setProductImages((prev) => {
+      const existingKeys = new Set(
+        prev
+          .filter((item) => item.kind === "new")
+          .map((item) => `${item.file.name}-${item.file.size}-${item.file.lastModified}`)
+      );
+      const uniqueFiles = validFiles.filter(
+        (file) => !existingKeys.has(`${file.name}-${file.size}-${file.lastModified}`)
+      );
+
+      const newItems = uniqueFiles.map((file, idx) => ({
+        id: `new-${file.name}-${file.size}-${file.lastModified}-${Date.now()}-${idx}`,
+        kind: "new",
+        file,
+        previewUrl: URL.createObjectURL(file),
+        name: file.name,
+      }));
+
+      return [...prev, ...newItems];
+    });
   }
+
+  function handleRemoveProductImage(id) {
+    setProductImages((prev) => {
+      const target = prev.find((item) => item.id === id);
+      if (target && target.kind === "new") {
+        URL.revokeObjectURL(target.previewUrl);
+      }
+      return prev.filter((item) => item.id !== id);
+    });
+    setImageError("");
+  }
+
+  function handleSetPrimaryProductImage(id) {
+    setProductImages((prev) => {
+      const target = prev.find((item) => item.id === id);
+      if (!target) return prev;
+      return [target, ...prev.filter((item) => item.id !== id)];
+    });
+  }
+
+  const initialExistingPaths = editingProduct
+    ? getProductImagePaths(editingProduct)
+    : [];
+  const hasImageChanges =
+    !editingProduct ||
+    productImages.length !== initialExistingPaths.length ||
+    productImages.some(
+      (item, idx) =>
+        item.kind !== "existing" || item.rawPath !== initialExistingPaths[idx]
+    );
 
   async function handleFormSubmit(e) {
     e.preventDefault();
@@ -154,6 +278,16 @@ export default function Products() {
       setFormError("Please select a category.");
       return;
     }
+    if (
+      editingProduct &&
+      initialExistingPaths.length > 0 &&
+      productImages.length === 0
+    ) {
+      setFormError(
+        "Please keep at least one existing image or add at least one new image."
+      );
+      return;
+    }
 
     setFormSubmitting(true);
     try {
@@ -165,24 +299,47 @@ export default function Products() {
       if (form.description.trim()) {
         formData.append("description", form.description.trim());
       }
-      if (imageFile) {
-        formData.append("image", imageFile);
-      }
 
       if (editingProduct) {
+        if (hasImageChanges && productImages.length > 0) {
+          let filesToUpload;
+          try {
+            filesToUpload = await Promise.all(
+              productImages.map((item) =>
+                item.kind === "new"
+                  ? Promise.resolve(item.file)
+                  : urlToImageFile(item.previewUrl, item.rawPath)
+              )
+            );
+          } catch (imgErr) {
+            setFormError(
+              "Could not include saved image(s) while updating. Ensure backend /img allows CORS or re-select the files manually."
+            );
+            setFormSubmitting(false);
+            return;
+          }
+          filesToUpload.forEach((file) => {
+            formData.append("images", file);
+          });
+        }
         await updateProduct(editingProduct.id, formData);
         showToast("Product updated successfully!");
       } else {
+        if (productImages.length > 0) {
+          productImages.forEach((item) => {
+            if (item.kind === "new" && item.file) {
+              formData.append("images", item.file);
+            }
+          });
+        }
         await createProduct(formData);
         showToast("New product created successfully!");
       }
 
-      setModalOpen(false);
+      closeProductModal();
       await loadData();
     } catch (err) {
-      const detail =
-        err.response?.data?.detail || "Failed to save product. Check inputs.";
-      setFormError(detail);
+      setFormError(formatProductApiError(err));
     } finally {
       setFormSubmitting(false);
     }
@@ -318,7 +475,9 @@ export default function Products() {
                 </thead>
                 <tbody className="divide-y divide-slate-700/50">
                   {filteredProducts.map((prod) => {
-                    const img = prod.image_url ? getAssetUrl(prod.image_url) : null;
+                    const imageUrls = getProductImageUrls(prod);
+                    const primaryImg = imageUrls[0] || "";
+                    const extraCount = Math.max(0, imageUrls.length - 1);
                     const stock = prod.stock || 0;
                     const catName =
                       prod.category?.name ||
@@ -332,24 +491,49 @@ export default function Products() {
                     return (
                       <tr key={prod.id} className="hover:bg-slate-700/30 transition-colors">
                         {/* Image & Title */}
-                        <td className="py-4 px-6 flex items-center gap-3">
-                          <div className="w-12 h-12 rounded-lg bg-slate-900 border border-slate-700 overflow-hidden shrink-0 flex items-center justify-center">
-                            {img ? (
-                              <img
-                                src={img}
-                                alt={prod.name}
-                                className="w-full h-full object-cover"
-                              />
-                            ) : (
-                              <span className="text-xl">📦</span>
-                            )}
-                          </div>
-                          <div>
-                            <div className="font-medium text-slate-100">
-                              {prod.name}
-                            </div>
-                            <div className="text-xs text-slate-400 max-w-xs truncate">
-                              {prod.description || "No description"}
+                        <td className="py-4 px-6">
+                          <div className="flex items-center gap-3">
+                            <button
+                              type="button"
+                              onClick={() => setGalleryProduct(prod)}
+                              title={
+                                imageUrls.length > 0
+                                  ? `View ${imageUrls.length} product image(s)`
+                                  : "View product details"
+                              }
+                              className="relative w-12 h-12 rounded-lg bg-slate-900 border border-slate-700 hover:border-indigo-500 overflow-hidden shrink-0 flex items-center justify-center transition cursor-pointer group"
+                            >
+                              {primaryImg ? (
+                                <img
+                                  src={primaryImg}
+                                  alt={prod.name}
+                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                                />
+                              ) : (
+                                <span className="text-xl">📦</span>
+                              )}
+                              {extraCount > 0 && (
+                                <span className="absolute bottom-0.5 right-0.5 rounded bg-slate-950/90 border border-slate-700 px-1 py-0.2 text-[10px] font-bold text-indigo-300 leading-tight shadow">
+                                  +{extraCount}
+                                </span>
+                              )}
+                            </button>
+                            <div className="min-w-0">
+                              <div className="font-medium text-slate-100 flex items-center gap-2">
+                                <span className="truncate">{prod.name}</span>
+                                {imageUrls.length > 1 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setGalleryProduct(prod)}
+                                    className="px-1.5 py-0.5 rounded bg-indigo-500/15 border border-indigo-500/30 text-[10px] font-semibold text-indigo-300 hover:bg-indigo-500/25 transition shrink-0 cursor-pointer"
+                                  >
+                                    {imageUrls.length} images
+                                  </button>
+                                )}
+                              </div>
+                              <div className="text-xs text-slate-400 max-w-xs truncate">
+                                {prod.description || "No description"}
+                              </div>
                             </div>
                           </div>
                         </td>
@@ -412,6 +596,12 @@ export default function Products() {
                         {/* Actions */}
                         <td className="py-4 px-6 text-right space-x-2 whitespace-nowrap">
                           <button
+                            onClick={() => setGalleryProduct(prod)}
+                            className="px-3 py-1.5 bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 border border-indigo-500/30 text-xs font-medium rounded-lg transition-colors cursor-pointer"
+                          >
+                            View{imageUrls.length > 0 ? ` (${imageUrls.length})` : ""}
+                          </button>
+                          <button
                             onClick={() => openEditModal(prod)}
                             className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium rounded-lg transition-colors cursor-pointer"
                           >
@@ -437,19 +627,19 @@ export default function Products() {
       {/* Add / Edit Product Modal */}
       <Modal
         isOpen={modalOpen}
-        onClose={() => setModalOpen(false)}
+        onClose={closeProductModal}
         title={editingProduct ? `Edit Product #${editingProduct.id}` : "Add New Product"}
         maxWidth="max-w-xl"
       >
         {formError && (
-          <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg text-rose-400 text-xs mb-4">
+          <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-rose-700 text-xs mb-4">
             {formError}
           </div>
         )}
 
         <form onSubmit={handleFormSubmit} className="space-y-4">
           <div>
-            <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+            <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
               Product Title *
             </label>
             <input
@@ -464,7 +654,7 @@ export default function Products() {
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
                 Price (₹) *
               </label>
               <input
@@ -479,7 +669,7 @@ export default function Products() {
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
                 Initial Stock *
               </label>
               <input
@@ -494,7 +684,7 @@ export default function Products() {
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+            <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
               Category *
             </label>
             <select
@@ -513,7 +703,7 @@ export default function Products() {
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+            <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
               Description
             </label>
             <textarea
@@ -525,35 +715,23 @@ export default function Products() {
             />
           </div>
 
-          {/* Image Upload & Preview */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
-              Product Image
-            </label>
-            <div className="flex items-center gap-4">
-              {imagePreview && (
-                <div className="w-16 h-16 rounded-lg bg-slate-900 border border-slate-700 overflow-hidden shrink-0">
-                  <img
-                    src={imagePreview}
-                    alt="Preview"
-                    className="w-full h-full object-cover"
-                  />
-                </div>
-              )}
-              <input
-                type="file"
-                accept="image/*"
-                onChange={handleImageChange}
-                className="text-xs text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 file:cursor-pointer cursor-pointer"
-              />
-            </div>
-          </div>
+          {/* Multi-Image Upload & Unified Previews */}
+          <ProductImagesInput
+            images={productImages}
+            onAddFiles={handleAddImageFiles}
+            onRemoveImage={handleRemoveProductImage}
+            onSetPrimary={handleSetPrimaryProductImage}
+            onClearAll={clearAllProductImages}
+            onResetSaved={resetToSavedImages}
+            canResetSaved={Boolean(editingProduct) && hasImageChanges}
+            imageError={imageError}
+          />
 
-          <div className="flex justify-end gap-3 pt-4 border-t border-slate-700/60">
+          <div className="flex justify-end gap-3 pt-4 border-t border-slate-200">
             <button
               type="button"
-              onClick={() => setModalOpen(false)}
-              className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm font-medium rounded-lg transition-colors cursor-pointer"
+              onClick={closeProductModal}
+              className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 text-sm font-medium rounded-lg transition-colors cursor-pointer"
             >
               Cancel
             </button>
@@ -570,6 +748,24 @@ export default function Products() {
           </div>
         </form>
       </Modal>
+
+      {/* Product Image Gallery & Details Modal */}
+      <ProductImageGalleryModal
+        product={galleryProduct}
+        categoryName={
+          galleryProduct
+            ? galleryProduct.category?.name ||
+              categories.find(
+                (c) =>
+                  String(c.id) ===
+                  String(galleryProduct.category_id || galleryProduct.category?.id)
+              )?.name ||
+              "General"
+            : ""
+        }
+        onClose={() => setGalleryProduct(null)}
+        onEdit={openEditModal}
+      />
     </div>
   );
 }

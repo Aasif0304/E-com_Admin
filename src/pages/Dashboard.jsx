@@ -3,10 +3,13 @@ import { Link, useNavigate } from "react-router-dom";
 import Header from "../components/Header";
 import StatCard from "../components/StatCard";
 import StatusBadge from "../components/StatusBadge";
-import { getProducts, updateProductStock } from "../api/products";
+import {
+  getProducts,
+  getProductImageUrls,
+  updateProductStock,
+} from "../api/products";
 import { getCategories } from "../api/categories";
 import { getAllOrders, updateOrderStatus } from "../api/orders";
-import { getAssetUrl } from "../api/axios";
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -222,6 +225,9 @@ export default function Dashboard() {
               {lowStockProducts.map((p) => {
                 const stock = p.stock || 0;
                 const isRestocking = restockingId === p.id;
+                const imageUrls = getProductImageUrls(p);
+                const primaryImg = imageUrls[0] || "";
+                const extraCount = Math.max(0, imageUrls.length - 1);
 
                 return (
                   <div
@@ -229,15 +235,20 @@ export default function Dashboard() {
                     className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl bg-slate-800/90 border border-slate-700/80 hover:border-slate-600 transition"
                   >
                     <div className="flex items-center gap-3.5">
-                      <div className="w-12 h-12 rounded-lg bg-slate-900 border border-slate-700 overflow-hidden shrink-0 flex items-center justify-center">
-                        {p.image_url ? (
+                      <div className="relative w-12 h-12 rounded-lg bg-slate-900 border border-slate-700 overflow-hidden shrink-0 flex items-center justify-center">
+                        {primaryImg ? (
                           <img
-                            src={getAssetUrl(p.image_url)}
+                            src={primaryImg}
                             alt={p.name}
                             className="w-full h-full object-cover"
                           />
                         ) : (
                           <span className="text-xl">📦</span>
+                        )}
+                        {extraCount > 0 && (
+                          <span className="absolute bottom-0.5 right-0.5 rounded bg-slate-950/90 border border-slate-700 px-1 text-[10px] font-bold text-indigo-300 leading-tight shadow">
+                            +{extraCount}
+                          </span>
                         )}
                       </div>
                       <div>
